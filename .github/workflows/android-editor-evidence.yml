@@ -40,6 +40,7 @@ jobs:
           PY
           sed -i '/^org.gradle.jvmargs=/d' android/gradle.properties
           printf '\norg.gradle.jvmargs=-Xmx2G -XX:MaxMetaspaceSize=768m\norg.gradle.workers.max=2\n' >> android/gradle.properties
+          sed -i 's/Platform.isAndroid ? 480 : 800/Platform.isAndroid ? 560 : 800/; s/home: Scaffold(body:/home: Scaffold(resizeToAvoidBottomInset: false, body:/' integration_test/editor.dart
           flutter pub get
           flutter build apk --debug --target-platform android-x64 --target integration_test/editor.dart
           (cd android && ./gradlew --stop)
@@ -55,10 +56,10 @@ jobs:
           arch: x86_64
           ram-size: 2048M
           heap-size: 256M
-          emulator-options: -no-window -no-snapshot -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -skin 720x1280
+          emulator-options: -no-window -no-snapshot -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -skin 840x1536
           disable-animations: true
           script: |
-            adb shell wm size 720x1280
+            adb shell wm size 840x1536
             adb shell wm density 240
             cd "$RUNNER_TEMP/editor" && flutter drive --no-pub --use-application-binary=build/app/outputs/flutter-apk/app-debug.apk --driver=test_driver/driver.dart --target=integration_test/editor.dart -d emulator-5554
       - name: Pair captures
@@ -71,3 +72,50 @@ jobs:
           name: android
           path: ${{ runner.temp }}/android/*.webp
           if-no-files-found: error
+  publish-captures:
+    needs: capture
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: README.md
+          sparse-checkout-cone-mode: false
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: 45002530795
+          name: linux
+          path: ${{ runner.temp }}/verified/linux
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ github.run_id }}
+          name: android
+          path: ${{ runner.temp }}/verified/android
+      - name: Publish eight comparisons in the fork
+        run: |
+          set -euo pipefail
+          git sparse-checkout disable
+          if git ls-remote --exit-code origin refs/heads/screenshots > /dev/null; then
+            git fetch origin refs/heads/screenshots
+            git switch -c screenshots FETCH_HEAD
+          else
+            git switch --orphan screenshots
+          fi
+          d=config-editor-ascii-digits
+          for p in android linux; do
+            mkdir -p "$d/$p"
+            for theme in light dark; do
+              for lang in en fa; do
+                cp "$RUNNER_TEMP/verified/$p/$theme-$lang.webp" "$d/$p/$theme-$lang.webp"
+              done
+            done
+          done
+          git add -- "$d"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git diff --cached --quiet || git commit -m 'videos: compare config editor digits on Android and Linux'
+          git push origin HEAD:refs/heads/screenshots
