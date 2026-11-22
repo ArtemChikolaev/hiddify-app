@@ -83,6 +83,7 @@ jobs:
             cd "$RUNNER_TEMP/editor" && flutter drive --driver=test_driver/driver.dart --target=integration_test/editor.dart -d emulator-5554
       - name: Pair the tree and text mode captures
         run: |
+          sudo apt-get install -y python3-pil fonts-dejavu-core
           cd "$RUNNER_TEMP/editor"
           /usr/bin/python3 compare.py captures "$RUNNER_TEMP/comparisons"
       - uses: actions/upload-artifact@v4
