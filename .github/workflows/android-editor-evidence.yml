@@ -1,0 +1,73 @@
+name: Android editor capture
+on:
+  push:
+    branches: [validation/android-editor-capture]
+    paths: [.github/workflows/android-editor-evidence.yml]
+permissions:
+  contents: read
+jobs:
+  capture:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.38.5'
+          cache: true
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Build the test APK before starting the emulator
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=3 origin 0e034420f3faa0e487ec38e40e29dbdaae6c1e77
+          flutter create --no-pub --platforms=android --project-name hiddify "$RUNNER_TEMP/editor"
+          cp -R review-2648/. "$RUNNER_TEMP/editor/"
+          p=lib/features/profile/details/json_editor.dart
+          mkdir -p "$RUNNER_TEMP/editor/$(dirname "$p")" "$RUNNER_TEMP/editor/assets"
+          git show 0e034420f3faa0e487ec38e40e29dbdaae6c1e77:"$p" > "$RUNNER_TEMP/editor/$p"
+          git show 365a2f567aa83558eae990219f3185a32842484f:"$p" > "$RUNNER_TEMP/editor/lib/before.dart"
+          cp assets/fonts/Shabnam.ttf "$RUNNER_TEMP/editor/assets/"
+          cd "$RUNNER_TEMP/editor"
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('android/app/src/main/AndroidManifest.xml')
+          p.write_text(p.read_text().replace('</application>', '<meta-data android:name="io.flutter.embedding.android.EnableImpeller" android:value="false" /></application>'))
+          PY
+          sed -i '/^org.gradle.jvmargs=/d' android/gradle.properties
+          printf '\norg.gradle.jvmargs=-Xmx2G -XX:MaxMetaspaceSize=768m\norg.gradle.workers.max=2\n' >> android/gradle.properties
+          flutter pub get
+          flutter build apk --debug --target-platform android-x64 --target integration_test/editor.dart
+          (cd android && ./gradlew --stop)
+          df -h .
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          ram-size: 2048M
+          heap-size: 256M
+          emulator-options: -no-window -no-snapshot -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -skin 720x1280
+          disable-animations: true
+          script: |
+            adb shell wm size 720x1280
+            adb shell wm density 240
+            cd "$RUNNER_TEMP/editor" && flutter drive --no-pub --use-application-binary=build/app/outputs/flutter-apk/app-debug.apk --driver=test_driver/driver.dart --target=integration_test/editor.dart -d emulator-5554
+      - name: Pair captures
+        run: |
+          sudo apt-get install -y python3-pil fonts-dejavu-core
+          cd "$RUNNER_TEMP/editor"
+          /usr/bin/python3 compare.py captures "$RUNNER_TEMP/android"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: ${{ runner.temp }}/android/*.webp
+          if-no-files-found: error
