@@ -1,0 +1,129 @@
+name: Verify config editor digits
+on:
+  push:
+    branches: [validation/config-editor-ascii-digits]
+permissions:
+  contents: read
+jobs:
+  capture:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux, android]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 4
+          persist-credentials: false
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.38.5'
+          cache: true
+      - name: Configure JDK
+        if: matrix.platform == 'android'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Create a minimal runner for the production editor
+        shell: bash
+        run: |
+          set -euo pipefail
+          flutter create --no-pub --platforms=${{ matrix.platform }} --project-name hiddify "$RUNNER_TEMP/editor"
+          cp -R review-2648/. "$RUNNER_TEMP/editor/"
+          p=lib/features/profile/details/json_editor.dart
+          t=test/features/profile/details/json_editor_test.dart
+          mkdir -p "$RUNNER_TEMP/editor/$(dirname "$p")" "$RUNNER_TEMP/editor/$(dirname "$t")" "$RUNNER_TEMP/editor/assets"
+          git show 3f5c4cf2fcd19dc64c6f7d0cab5603a4b921d8d6:"$p" > "$RUNNER_TEMP/editor/$p"
+          git show 365a2f567aa83558eae990219f3185a32842484f:"$p" > "$RUNNER_TEMP/editor/lib/before.dart"
+          git show 3f5c4cf2fcd19dc64c6f7d0cab5603a4b921d8d6:"$t" > "$RUNNER_TEMP/editor/$t"
+          cp assets/fonts/Shabnam.ttf "$RUNNER_TEMP/editor/assets/"
+          cd "$RUNNER_TEMP/editor"
+          flutter pub get
+      - name: Check regression on original and fixed editor
+        if: matrix.platform == 'linux'
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/editor"
+          t=test/features/profile/details/json_editor_test.dart
+          sed 's|package:hiddify/features/profile/details/json_editor.dart|package:hiddify/before.dart|' "$t" > test/before_test.dart
+          if flutter test --no-pub test/before_test.dart --reporter expanded > before.log 2>&1; then
+            echo "Original editor unexpectedly passed"; exit 1
+          fi
+          cat before.log
+          grep -F "Expected: 'monospace'" before.log
+          flutter test --no-pub "$t" --reporter expanded
+      - name: Install desktop build and display dependencies
+        if: matrix.platform == 'linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libglu1-mesa xvfb
+      - name: Run editor on Linux
+        if: matrix.platform == 'linux'
+        run: |
+          cd "$RUNNER_TEMP/editor"
+          NO_AT_BRIDGE=1 LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s '-screen 0 1600x1000x24' flutter drive --driver=test_driver/driver.dart --target=integration_test/editor.dart -d linux
+      - name: Enable Android hardware acceleration
+        if: matrix.platform == 'android'
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Run editor on Android
+        if: matrix.platform == 'android'
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          script: |
+            adb shell wm size 1080x2100
+            adb shell wm density 320
+            cd "$RUNNER_TEMP/editor" && flutter drive --driver=test_driver/driver.dart --target=integration_test/editor.dart -d emulator-5554
+      - name: Pair the tree and text mode captures
+        run: |
+          cd "$RUNNER_TEMP/editor"
+          /usr/bin/python3 compare.py captures "$RUNNER_TEMP/comparisons"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: ${{ runner.temp }}/comparisons/*.webp
+          if-no-files-found: error
+  publish-captures:
+    needs: capture
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: README.md
+          sparse-checkout-cone-mode: false
+      - uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/verified
+      - name: Publish eight comparisons in the fork
+        run: |
+          set -euo pipefail
+          git sparse-checkout disable
+          if git ls-remote --exit-code origin refs/heads/screenshots > /dev/null; then
+            git fetch origin refs/heads/screenshots
+            git switch -c screenshots FETCH_HEAD
+          else
+            git switch --orphan screenshots
+          fi
+          d=config-editor-ascii-digits
+          for p in android linux; do
+            mkdir -p "$d/$p"
+            for theme in light dark; do
+              for lang in en fa; do
+                cp "$RUNNER_TEMP/verified/$p/$theme-$lang.webp" "$d/$p/$theme-$lang.webp"
+              done
+            done
+          done
+          git add -- "$d"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git diff --cached --quiet || git commit -m 'videos: compare config editor digits on Android and Linux'
+          git push origin HEAD:refs/heads/screenshots
